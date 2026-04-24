@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import minimist from 'minimist';
-import { appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync, cpSync } from 'fs';
-import { join } from 'path';
+import { appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync, cpSync, readdirSync, statSync } from 'fs';
+import { join, dirname, basename } from 'path';
 import { homedir } from 'os';
 import { v4 as uuidv4 } from 'uuid';
 // @ts-ignore
 import Database from 'better-sqlite3';
+
+const HOME = homedir();
 
 interface Execution {
   id: string;
@@ -24,6 +26,31 @@ interface Execution {
 
 const EXEC_DIR = join(homedir(), '.agent-lens');
 const EXEC_FILE = join(EXEC_DIR, 'executions.jsonl');
+
+const AGENT_LENS_MARKER = '<!-- agent-lens:start -->';
+const AGENT_LENS_BLOCK = `
+${AGENT_LENS_MARKER}
+<!-- Managed by agent-lens (agent-lens-cli) -->
+<!-- After completing a task, execute: agent-lens log --prompt "<task>" --context "<files>" --project <project> --agent <agent> --exit 0 -->
+<!-- See: ~/.agent-lens/agent-lens.md or https://github.com/MiniGalaxyMage/agent-lens -->
+<!-- agent-lens:end -->
+`;
+const AGENT_LENS_SKILL = `---
+name: agent-lens
+description: Log agent execution context to ~/.agent-lens/executions.jsonl
+---
+# Agent Lens
+
+After completing ANY task, execute:
+\`\`\`bash
+agent-lens log \\
+  --prompt "<the task>" \\
+  --context "<files_read>" \\
+  --project <project> \\
+  --agent <agent> \\
+  --exit 0
+\`\`\`
+`;
 
 // Generic tool detector — parses stdout/stderr to infer which tools/commands were used
 // Works for any agent that produces shell-like output
@@ -187,45 +214,134 @@ Examples:
   }
 
   if (argv.install) {
-    // Inline install — detect agents and inject skill
-    const agentsHome = join(homedir(), '.openclaw', 'workspace');
-    const agentsOasis = join(homedir(), 'openclaw', 'agentes');
-    const fellowshipSkills = join(homedir(), 'DEV', 'FDD', 'fellowship', 'skills');
-
-    const marker = '\n<!-- agent-lens:start -->\n<!-- Managed by agent-lens -->\n<!-- After task: agent-lens log --prompt "<task>" --context "<files>" --project <proj> --agent <agent> --exit 0 -->\n<!-- agent-lens:end -->\n';
-    const skillDest = join(homedir(), '.openclaw', 'workspace', 'skills', 'agent-lens.md');
-
-    function inject(path: string, name: string): void {
-      if (!existsSync(path)) { console.log(`[MISS] ${name}`); return; }
-      const c = readFileSync(path, 'utf-8');
-      if (c.includes('agent-lens:start')) { console.log(`[SKIP] ${name} — already installed`); return; }
-      writeFileSync(path, c.trimEnd() + marker);
-      console.log(`[OK] ${name}`);
-    }
-
-    console.log('\n🔍 Agent Lens Installer\n========================\n');
-
-    mkdirSync(join(homedir(), '.openclaw', 'workspace', 'skills'), { recursive: true });
-    const srcSkill = join(homedir(), 'DEV', 'FDD', 'fellowship', 'skills', 'agent-lens.md');
-    if (existsSync(srcSkill)) {
-      cpSync(srcSkill, skillDest, { force: true });
-      console.log(`[OK] Skill → ${skillDest}`);
-    }
-
-    inject(join(agentsHome, 'AGENTS.md'), 'AGENTS.md');
-    inject(join(agentsHome, 'SOUL.md'), 'SOUL.md');
-    inject(join(agentsOasis, 'forge-profile.md'), 'forge-profile.md');
-    inject(join(agentsOasis, 'davinci-profile.md'), 'davinci-profile.md');
-
-    mkdirSync(fellowshipSkills, { recursive: true });
-    if (existsSync(srcSkill) && srcSkill !== join(fellowshipSkills, 'agent-lens.md')) {
-      cpSync(srcSkill, join(fellowshipSkills, 'agent-lens.md'), { force: true });
-      console.log(`[OK] Fellowship skill`);
-    }
-
-    console.log('\n✅ Done! Agents will now log executions to ~/.agent-lens/executions.jsonl\n');
+    doInstall();
     return;
   }
+
+// ── Agent install ───────────────────────────────────────────────────────────
+
+function ensureDir(dir: string): void {
+  mkdirSync(dir, { recursive: true });
+}
+
+function inject(content: string): string {
+  if (content.includes(AGENT_LENS_MARKER)) return content;
+  return content.trimEnd() + '\n' + AGENT_LENS_BLOCK;
+}
+
+function injectInto(path: string, label: string): boolean {
+  if (!existsSync(path)) return false;
+  try {
+    const stat = statSync(path);
+    if (stat.isDirectory()) { console.log(`  [SKIP] ${label} — is a directory`); return false; }
+  } catch { return false; }
+  const c = readFileSync(path, 'utf-8');
+  if (c.includes(AGENT_LENS_MARKER)) { console.log(`  [SKIP] ${label} — already has agent-lens`); return false; }
+  writeFileSync(path, inject(c));
+  console.log(`  [OK]   ${label}`);
+  return true;
+}
+
+function scanForAgentFiles(root: string, maxDepth = 3): string[] {
+  const results: string[] = [];
+  const names = ['CLAUDE.md', '.claude.md', 'AGENTS.md', 'PERCIVAL.md', 'AGENT.md', '.agent.md'];
+  function walk(dir: string, depth: number): void {
+    if (depth > maxDepth) return;
+    try {
+      for (const entry of readdirSync(dir)) {
+        if (entry === 'node_modules' || entry === '.git' || entry === 'dist' || entry === 'target') continue;
+        const full = join(dir, entry);
+        try {
+          const stat = statSync(full);
+          if (stat.isDirectory()) walk(full, depth + 1);
+          else if (names.includes(entry)) results.push(full);
+        } catch {}
+      }
+    } catch {}
+  }
+  walk(root, 0);
+  return results;
+}
+
+function doInstall(): void {
+  console.log('\n🔍 Agent Lens Installer\n========================\n');
+
+  let installed = 0;
+  const skillDir = join(HOME, '.agent-lens');
+  const skillPath = join(skillDir, 'agent-lens.md');
+  const SKILL_SOURCE = join(HOME, 'DEV', 'FDD', 'fellowship', 'skills', 'agent-lens.md');
+
+  ensureDir(skillDir);
+  if (!existsSync(skillPath) || !readFileSync(skillPath, 'utf-8').includes('agent-lens')) {
+    const content = existsSync(SKILL_SOURCE) ? readFileSync(SKILL_SOURCE, 'utf-8') : AGENT_LENS_SKILL;
+    writeFileSync(skillPath, content);
+    console.log(`  [OK]   ~/.agent-lens/agent-lens.md`);
+    installed++;
+  } else {
+    console.log(`  [SKIP] ~/.agent-lens/agent-lens.md — already exists`);
+  }
+
+  // Known agent config paths
+  const targets: Array<{ label: string; path: string }> = [
+    // Percival
+    { label: 'SOUL.md', path: join(HOME, '.openclaw', 'workspace', 'SOUL.md') },
+    { label: 'AGENTS.md', path: join(HOME, '.openclaw', 'workspace', 'AGENTS.md') },
+    { label: 'Percival skills', path: join(HOME, '.openclaw', 'workspace', 'skills', 'agent-lens.md') },
+    // OASIS
+    { label: 'forge-profile', path: join(HOME, 'openclaw', 'agentes', 'forge-profile.md') },
+    { label: 'davinci-profile', path: join(HOME, 'openclaw', 'agentes', 'davinci-profile.md') },
+    { label: 'sprite-profile', path: join(HOME, 'openclaw', 'agentes', 'sprite-profile.md') },
+    { label: 'hawk-profile', path: join(HOME, 'openclaw', 'agentes', 'hawk-profile.md') },
+    // Fellowship
+    { label: 'Fellowship', path: join(HOME, 'DEV', 'FDD', 'fellowship', 'skills', 'agent-lens.md') },
+    // Claude Code global
+    { label: 'Claude Code global', path: join(HOME, '.claude', 'CLAUDE.md') },
+    { label: 'Claude Code home', path: join(HOME, 'CLAUDE.md') },
+    // Codex
+    { label: 'Codex config', path: join(HOME, '.codex', 'config') },
+    { label: 'CODEX.md', path: join(HOME, 'CODEX.md') },
+    // Cursor
+    { label: 'Cursor rules', path: join(HOME, '.cursor', 'rules', 'agent-lens.mdc') },
+    // Gemini CLI
+    { label: 'Gemini CLI', path: join(HOME, '.gemini', 'CLAUDE.md') },
+    // Windsurf
+    { label: 'Windsurf rules', path: join(HOME, '.windsurf', 'rules', 'agent-lens.mdc') },
+  ];
+
+  console.log('\n[Agent configs]');
+  for (const { label, path } of targets) {
+    const dir = dirname(path);
+    ensureDir(dir);
+    if (existsSync(SKILL_SOURCE) && path === join(HOME, 'DEV', 'FDD', 'fellowship', 'skills', 'agent-lens.md')) {
+      // Fellowship — copy skill
+      if (!existsSync(path) || !readFileSync(path, 'utf-8').includes('agent-lens')) {
+        cpSync(SKILL_SOURCE, path, { force: true });
+        console.log(`  [OK]   ${label}`);
+        installed++;
+      } else {
+        console.log(`  [SKIP] ${label} — already has agent-lens`);
+      }
+    } else if (injectInto(path, label)) {
+      installed++;
+    }
+  }
+
+  // Scan DEV and Documents for CLAUDE.md / AGENTS.md
+  console.log('\n[Scanning ~/DEV and ~/Documents]');
+  const found = [...scanForAgentFiles(join(HOME, 'DEV')), ...scanForAgentFiles(join(HOME, 'Documents'))];
+  if (found.length === 0) {
+    console.log('  (none found)');
+  } else {
+    for (const p of found) {
+      const label = basename(dirname(p)) + '/' + basename(p);
+      if (injectInto(p, label)) installed++;
+    }
+  }
+
+  console.log('\n------------------------');
+  console.log(installed > 0 ? `✅ Done! ${installed} location(s) configured.` : '✅ Already up to date.');
+  console.log('\n  Log: ~/.agent-lens/executions.jsonl\n');
+}
 
   const ctx = argv.context || '';
   const ski = argv.skills || '';
