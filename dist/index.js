@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import minimist from 'minimist';
-import { appendFileSync, readFileSync, mkdirSync, existsSync } from 'fs';
+import { appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync, cpSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { v4 as uuidv4 } from 'uuid';
@@ -118,7 +118,7 @@ function importToDb() {
 async function main() {
     const argv = minimist(process.argv.slice(2), {
         string: ['prompt', 'project', 'agent', 'status', 'stdout', 'stderr', 'id', 'timestamp', 'context', 'skills', 'exit'],
-        boolean: ['import', 'help'],
+        boolean: ['import', 'install', 'help'],
         default: { status: 'success', project: 'default', agent: 'agent' },
     });
     if (argv.help) {
@@ -128,6 +128,7 @@ Agent Lens CLI — Log agent executions
 Usage:
   agent-lens log [options]          Log a new execution
   agent-lens --import              Import from executions.jsonl to SQLite
+  agent-lens --install             Detect agents and inject agent-lens skill
 
 Options:
   --prompt      The prompt/request sent to the agent
@@ -153,6 +154,45 @@ Examples:
     }
     if (argv.import) {
         importToDb();
+        return;
+    }
+    if (argv.install) {
+        // Inline install — detect agents and inject skill
+        const agentsHome = join(homedir(), '.openclaw', 'workspace');
+        const agentsOasis = join(homedir(), 'openclaw', 'agentes');
+        const fellowshipSkills = join(homedir(), 'DEV', 'FDD', 'fellowship', 'skills');
+        const marker = '\n<!-- agent-lens:start -->\n<!-- Managed by agent-lens -->\n<!-- After task: agent-lens log --prompt "<task>" --context "<files>" --project <proj> --agent <agent> --exit 0 -->\n<!-- agent-lens:end -->\n';
+        const skillDest = join(homedir(), '.openclaw', 'workspace', 'skills', 'agent-lens.md');
+        function inject(path, name) {
+            if (!existsSync(path)) {
+                console.log(`[MISS] ${name}`);
+                return;
+            }
+            const c = readFileSync(path, 'utf-8');
+            if (c.includes('agent-lens:start')) {
+                console.log(`[SKIP] ${name} — already installed`);
+                return;
+            }
+            writeFileSync(path, c.trimEnd() + marker);
+            console.log(`[OK] ${name}`);
+        }
+        console.log('\n🔍 Agent Lens Installer\n========================\n');
+        mkdirSync(join(homedir(), '.openclaw', 'workspace', 'skills'), { recursive: true });
+        const srcSkill = join(homedir(), 'DEV', 'FDD', 'fellowship', 'skills', 'agent-lens.md');
+        if (existsSync(srcSkill)) {
+            cpSync(srcSkill, skillDest, { force: true });
+            console.log(`[OK] Skill → ${skillDest}`);
+        }
+        inject(join(agentsHome, 'AGENTS.md'), 'AGENTS.md');
+        inject(join(agentsHome, 'SOUL.md'), 'SOUL.md');
+        inject(join(agentsOasis, 'forge-profile.md'), 'forge-profile.md');
+        inject(join(agentsOasis, 'davinci-profile.md'), 'davinci-profile.md');
+        mkdirSync(fellowshipSkills, { recursive: true });
+        if (existsSync(srcSkill) && srcSkill !== join(fellowshipSkills, 'agent-lens.md')) {
+            cpSync(srcSkill, join(fellowshipSkills, 'agent-lens.md'), { force: true });
+            console.log(`[OK] Fellowship skill`);
+        }
+        console.log('\n✅ Done! Agents will now log executions to ~/.agent-lens/executions.jsonl\n');
         return;
     }
     const ctx = argv.context || '';
