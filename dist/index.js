@@ -96,6 +96,11 @@ function getDb() {
     CREATE INDEX IF NOT EXISTS idx_executions_timestamp ON executions(timestamp DESC);
     CREATE INDEX IF NOT EXISTS idx_executions_project ON executions(project);
   `);
+    // Migrate old schema (pre-tools_used)
+    try {
+        db.exec("ALTER TABLE executions ADD COLUMN tools_used TEXT NOT NULL DEFAULT '[]'");
+    }
+    catch { /* column already exists */ }
     return db;
 }
 function saveToJsonl(exec) {
@@ -341,6 +346,7 @@ Examples:
         exit_code: exitCode,
     };
     saveToJsonl(exec);
+    importToDb(); // Auto-import so it's immediately visible in Agent Lens app
     console.log(`Logged execution ${exec.id}${tools.length > 0 ? ` (${tools.length} tools detected: ${tools.join(', ')})` : ''}`);
 }
 main();
